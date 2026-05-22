@@ -1,606 +1,557 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Apr 19 22:54:04 2026
+SOL to ACM-DL Converter
+Scrapes proceedings data from SOL (SBC Open Library) and generates
+the XML files required for import into the ACM Digital Library.
 
 @author: Viterbo, J.
-
-       
 """
 
 import requests
-#from requests import Session
 from requests.exceptions import RequestException
-#from contextlib import closing
 from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime
 
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+SOL_BASE_URL = "https://sol.sbc.org.br/index.php"
+
+PROC_TYPES = [
+    "acmconferences",
+    "acmotherconferences",
+    "dlproceedings",
+    "guideproceedings",
+    "sbcconferences",
+]
+
+BOOK_TYPES = [
+    "ACM Conferences",
+    "ACM Other Conferences",
+    "DL Proceedings",
+    "Guide Proceedings",
+    "SBC Conferences",
+]
+
+SECTION_MAP = {
+    "Artigos Curtos": "short-paper",
+}
+DEFAULT_SECTION = "research-article"
 
 
+# ---------------------------------------------------------------------------
+# HTTP helpers
+# ---------------------------------------------------------------------------
 
-def simple_get(url):
+def fetch_html(url: str) -> bytes | None:
     """
-    Attempts to get the content at `url` by making an HTTP GET request.
-    If the content-type of response is some kind of HTML/XML, return the
-    text content, otherwise return None.
+    Makes an HTTP GET request to *url* and returns the raw content if the
+    response is a successful HTML/XML page, or None otherwise.
     """
     try:
-        s = requests.Session()
-        resp = s.get(url, headers = {"Accept-Language": "en"}, cookies={'from-my': 'browser'}, stream=True)
-        if is_good_response(resp):
-            return resp.content
-        else:
-            return None
-
-    except RequestException as e:
-        log_error('Error during requests to {0} : {1}'.format(url, str(e)))
+        session = requests.Session()
+        response = session.get(
+            url,
+            headers={"Accept-Language": "en"},
+            cookies={"from-my": "browser"},
+            stream=True,
+        )
+        content_type = response.headers.get("Content-Type", "").lower()
+        if response.status_code == 200 and "html" in content_type:
+            return response.content
+        return None
+    except RequestException as exc:
+        print(f"[ERROR] Request failed for {url}: {exc}")
         return None
 
-def is_good_response(resp):
-    """
-    Returns True if the response seems to be HTML, False otherwise.
-    """
-    content_type = resp.headers['Content-Type'].lower()
-    return (resp.status_code == 200 
-            and content_type is not None 
-            and content_type.find('html') > -1)
 
-def log_error(e):
-    """
-    It is always a good idea to log errors. 
-    This function just prints them, but you can
-    make it do anything.
-    """
-    print(e)
+def parse_html(url: str) -> BeautifulSoup:
+    """Fetches *url* and returns a BeautifulSoup object."""
+    html = fetch_html(url)
+    return BeautifulSoup(html, "html.parser")
 
-def getart(link):
-    """
-    Attempts to get the content at `url` that corresponds to an article
-    page.
-    """
-    html = simple_get(link)
-    return BeautifulSoup(html,"html.parser")
 
-def htmlspecialchars(text):
+# ---------------------------------------------------------------------------
+# HTML encoding
+# ---------------------------------------------------------------------------
+
+def html_escape(text: str) -> str:
+    """Escapes the characters &, ", <, > for safe embedding in XML."""
     return (
-        text.replace("&", "&amp;").
-        replace('"', "&quot;").
-        replace("<", "&lt;").
-        replace(">", "&gt;")
+        text
+        .replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
     )
 
 
-def check_article(proc, id_submission, pages):
-    link = "https://sol.sbc.org.br/index.php/"+proc+"/article/view/"+id_submission
-    print(link)
-    html = simple_get(link)
-    res = BeautifulSoup(html,"html.parser")
-    title = None
-    title_alt = None
-    abstract = None
-    lang = None
-    doi = None
-    author_list=[]
-    affil_list=[]
-    k_author = 0
-    metas = res.findAll('meta')
-    for meta in metas:
-        meta_name = meta.get("name", None)
-        if meta_name == "DC.Language":
-            lang = meta.get("content", None)
-        if meta_name == "DC.Type.articleType":
-            section = meta.get("content", None)
-        if meta_name == "DC.Title":
-            title = meta.get("content", None)
-        if meta_name == "DC.Title.Alternative":
-            title_alt = meta.get("content", None)
-        if meta_name == "DC.Identifier.DOI":
-            doi = meta.get("content", None)
-        if meta_name == "DC.Description":
-            abs_lang = meta.get("xml:lang", None)
-            if abs_lang == "en":
-                abstract = meta.get("content", None)
-            if abs_lang == "pt":
-                abstract_alt = meta.get("content", None)
-        if meta_name == "citation_date":
-            pub_date = meta.get("content", None)
-            pub_year = pub_date[0:4]
-        if meta_name == "citation_author":
-            author = meta.get("content", None)
-            #print(author)
-            author_list.append(author)
-            k_author = k_author + 1
-        if meta_name == "citation_author_institution":
-            affil = meta.get("content", None)
-            #print(affil)
-            affil_list.append(affil)
-        if meta_name == "citation_firstpage":
-            first_page = meta.get("content", None)
-        if meta_name == "citation_lastpage":
-            last_page = meta.get("content", None)
-        if meta_name == "DC.Date.created":
-            pub_date = meta.get("content", None)
-            
-            
-    section = section.strip()
-    
-    if section == "Artigos Curtos":
-        section = "short-paper"
-    else:
-        section = "research-article"
-    
-    paper_meta = {}
-    paper_meta["id"] = id_submission
-    paper_meta["section"] = section
-    paper_meta["title"] = title.strip()
-    paper_meta["title_alt"] = title_alt.strip()
-    paper_meta["abstract"] = abstract.strip()
-    paper_meta["abstract_alt"] = abstract_alt.strip()
-    if doi is not None:
-        paper_meta["doi"] = doi.strip()
-    paper_meta["pub_year"] = pub_year.strip()
-    paper_meta["pages"] = pages.strip()
-    paper_meta["num_authors"] = k_author
-    paper_meta["authors_list"] = author_list
-    paper_meta["affils_list"] = affil_list
-    paper_meta["first_page"] = first_page
-    paper_meta["last_page"] = last_page
-    paper_meta["pub_date"] = pub_date
-    
-    paper_meta["refs"] = ""
-    div_ref = res.find('div', class_= 'item references')  
-    if div_ref is not None:
-        div_ref_val = div_ref.find('div', class_= 'value')        
-        if div_ref_val is not None:
-            paper_meta["refs"] = div_ref_val.text
+# ---------------------------------------------------------------------------
+# SOL scraping
+# ---------------------------------------------------------------------------
 
-    paper_meta["kwds"] = ""
-    div_kwd = res.find('div', class_= 'item keywords')  
-    if div_kwd is not None:
-        div_kwd_val = div_kwd.find('span', class_= 'value')
-        if div_kwd_val is not None:
-            paper_meta["kwds"] = div_kwd_val.text
-
-    
-    return paper_meta
-            
-    # if lang == "en":
-    #     return id_submission, title, abstract, pub_year, k_author, author_list, affil_list
-    # else:
-    #     return id_submission, title_alt, abstract_alt, pub_year, k_author, author_list, affil_list
-
-def get_paper_links_in_volume(link):
-
-    """ 
-    Getting the content of the volume index page 
+def get_issue_paper_ids(proc_path: str, proc_id: str) -> tuple[list, list, str]:
     """
-    html = simple_get(link)
-    
-    res = BeautifulSoup(html,"html.parser")
-    
-    #print("Vai contar o número de artigos em "+link)
-    hrefpapers_vet = []
-    
-    numpapers = 0
-    divs = res.findAll('div', class_= 'obj_article_summary')
-    for div in divs:
-        #print(str(div))
-        divs2 = div.findAll('div', class_= 'title')        
-        for div2 in divs2:
-            a_hrefs = div2.findAll('a')
-            href = a_hrefs[0]
-            #print(str(href['href']))
-            numpapers = numpapers + 1
-            hrefpapers_vet.append(href['href'])
-
-    return hrefpapers_vet
-    
-def get_paper_ids_in_volume(link):
-
-    """ 
-    Getting the content of the volume index page 
+    Fetches the issue index page and returns:
+      - list of article submission IDs
+      - list of page ranges (one per article)
+      - publication date string
     """
-    html = simple_get(link)
-        
-    res = BeautifulSoup(html,"html.parser")
-    
-    #print("Vai contar o número de artigos em "+link)
-    hrefpapers_vet = []
-    pagepapers_vet = []
-    
-    numpapers = 0
-    div_pub = res.find('div', class_= 'published')
-    date_pub = div_pub.find('span', class_= 'value').string
-    divs = res.findAll('div', class_= 'obj_article_summary')
-    for div in divs:
-        #print(str(div))
-        div2 = div.find('div', class_= 'title')        
-        div3 = div.find('div', class_= 'pages')        
-        if div2 is not None:
-            a_hrefs = div2.findAll('a')
-            href = a_hrefs[0]
-            #print(str(href['href']))
-            numpapers = numpapers + 1
-            link_paper = href['href']
-            link_list = link_paper.split("/")
-            id_submission = link_list[len(link_list)-1]
-            hrefpapers_vet.append(id_submission)
-            
-        if div3 is not None:
-            pagepapers_vet.append(div3.string.strip())
-        else:
-            pagepapers_vet.append("no page number")
-            
-    print(hrefpapers_vet)
-    return hrefpapers_vet, pagepapers_vet, date_pub
-    
-    
+    issue_url = f"{SOL_BASE_URL}/{proc_path}/issue/view/{proc_id}"
+    print(f"Fetching issue index: {issue_url}")
+
+    soup = parse_html(issue_url)
+
+    date_pub = (
+        soup.find("div", class_="published")
+        .find("span", class_="value")
+        .string
+    )
+
+    paper_ids, page_ranges = [], []
+
+    for article_div in soup.find_all("div", class_="obj_article_summary"):
+        title_div = article_div.find("div", class_="title")
+        pages_div = article_div.find("div", class_="pages")
+
+        if title_div:
+            href = title_div.find_all("a")[0]["href"]
+            submission_id = href.rstrip("/").split("/")[-1]
+            paper_ids.append(submission_id)
+            page_ranges.append(
+                pages_div.string.strip() if pages_div else "no page number"
+            )
+
+    print(f"Found {len(paper_ids)} articles. Published: {date_pub}")
+    return paper_ids, page_ranges, date_pub
 
 
-def get_params():
-    
-    param_dict = {}
-    
-    with open('params.txt','r',encoding='utf-8') as fin:
-        lines = fin.readlines()
-        
-    for line in lines:
-        line = line.replace('=', '\=')
-        params = line.split('\=',1)
-        key = params[0]
-        val = params[1].rstrip('\n').replace('\=', '=')
-        param_dict[key] = val
-        #print(key+': '+val)
-        
-    return param_dict
+def scrape_article(proc_path: str, submission_id: str, pages: str) -> dict:
+    """
+    Visits the SOL article page for *submission_id* and returns a dict with
+    all metadata needed to build the ACM-DL XML files.
+    """
+    url = f"{SOL_BASE_URL}/{proc_path}/article/view/{submission_id}"
+    print(f"  Scraping: {url}")
 
-def output_paper_keywords(fout, params, date_pub, paper_meta_vet, i):
+    soup = parse_html(url)
 
-    fout.write("\t\t\t<kwd-group>\n")
-        
-    kwd_list = paper_meta_vet[i]["kwds"].split(',')
+    meta = {
+        "id": submission_id,
+        "pages": pages.strip(),
+        "authors_list": [],
+        "affils_list": [],
+        "refs": "",
+        "kwds": "",
+        "abstract": "",
+        "abstract_alt": "",
+        "title_alt": "",
+        "doi": None,
+    }
+    section_raw = ""
 
-    for kwd in kwd_list:
-        kwd = kwd.strip()
-        fout.write("\t\t\t\t<kwd>"+kwd+"</kwd>\n")
-    
-    fout.write("\t\t\t</kwd-group>\n")
+    for tag in soup.find_all("meta"):
+        name = tag.get("name")
+        content = tag.get("content", "")
 
+        if name == "DC.Language":
+            meta["lang"] = content
+        elif name == "DC.Type.articleType":
+            section_raw = content
+        elif name == "DC.Title":
+            meta["title"] = content
+        elif name == "DC.Title.Alternative":
+            meta["title_alt"] = content
+        elif name == "DC.Identifier.DOI":
+            meta["doi"] = content
+        elif name == "DC.Description":
+            if tag.get("xml:lang") == "en":
+                meta["abstract"] = content
+            elif tag.get("xml:lang") == "pt":
+                meta["abstract_alt"] = content
+        elif name in ("citation_date", "DC.Date.created"):
+            meta["pub_date"] = content
+            meta["pub_year"] = content[:4]
+        elif name == "citation_author":
+            meta["authors_list"].append(content)
+        elif name == "citation_author_institution":
+            meta["affils_list"].append(content)
+        elif name == "citation_firstpage":
+            meta["first_page"] = content
+        elif name == "citation_lastpage":
+            meta["last_page"] = content
 
-def output_paper_references(fout, params, date_pub, paper_meta_vet, i):
-    
-    fout.write("\t\t<back>\n")
-    fout.write("\t\t\t<ref-list specific-use=\"unparsed\">\n")
-    
-    seq = 1
-    
-    if paper_meta_vet[i]["refs"] is not None:
-        refs_list = paper_meta_vet[i]["refs"].splitlines()
+    meta["section"] = SECTION_MAP.get(section_raw.strip(), DEFAULT_SECTION)
+    meta["title"] = meta.get("title", "").strip()
+    meta["title_alt"] = meta["title_alt"].strip()
+    meta["abstract"] = meta["abstract"].strip()
+    meta["abstract_alt"] = meta["abstract_alt"].strip()
+    if meta["doi"]:
+        meta["doi"] = meta["doi"].strip()
 
-        for line in refs_list:
-            line = line.replace("[link]", '')
-            line = line.strip()
-            if line != '':
-                fout.write("\t\t\t\t<ref id=\"ref-"+str(seq).zfill(5)+"\">\n")
-                fout.write("\t\t\t\t\t<mixed-citation>"+htmlspecialchars(line)+"</mixed-citation>\n")
-                fout.write("\t\t\t\t</ref>\n")
-                seq = seq + 1
+    ref_div = soup.find("div", class_="item references")
+    if ref_div:
+        val_div = ref_div.find("div", class_="value")
+        if val_div:
+            meta["refs"] = val_div.text
 
-    fout.write("\t\t\t</ref-list>\n")
-    fout.write("\t\t</back>\n")
-    
+    kwd_div = soup.find("div", class_="item keywords")
+    if kwd_div:
+        val_span = kwd_div.find("span", class_="value")
+        if val_span:
+            meta["kwds"] = val_span.text
 
-
-
-def output_paper_authors(fout, params, date_pub, paper_meta_vet, i):
-
-    fout.write("\t\t\t<contrib-group>\n")
-    
-    seq = 1
-        
-    for k in range(len(paper_meta_vet[i]["authors_list"])):
-        
-        name_parts = paper_meta_vet[i]["authors_list"][k].split()
-        surname = name_parts[len(name_parts)-1]
-        del name_parts[len(name_parts)-1]
-            
-        given_names = ''
-        
-        for part in name_parts:
-            given_names = given_names + part + ' '
-        
-        given_names = given_names.strip()
-
-
-        fout.write("\t\t\t\t<contrib contrib-type=\"author\" corresp=\"no\" id=\"artseq-"+str(seq).zfill(5)+"\">\n")
-        fout.write("\t\t\t\t\t<name>\n")
-        fout.write("\t\t\t\t\t\t<surname>"+surname+"</surname>\n")
-        fout.write("\t\t\t\t\t\t<given-names>"+given_names+"</given-names>\n")
-        fout.write("\t\t\t\t\t</name>\n")
-        fout.write("\t\t\t\t\t<aff>"+paper_meta_vet[i]["affils_list"][k]+"</aff>\n")
-        fout.write("\t\t\t\t\t<role>Author</role>\n")
-        fout.write("\t\t\t\t</contrib>\n")
-        seq = seq + 1
-
-    fout.write("\t\t\t</contrib-group>\n")
+    return meta
 
 
-def output_paper_file(params, date_pub, paper_meta_vet, i):
-    
-    doi_parts = paper_meta_vet[i]["doi"].split('/')
-    doi_ext = doi_parts[1]
-    
-    paper_path = root_path+"/"+doi_ext    
-    Path(paper_path).mkdir(parents=True, exist_ok=True)
+# ---------------------------------------------------------------------------
+# Params file
+# ---------------------------------------------------------------------------
 
-    fout = open(paper_path+"/"+doi_ext+".xml", "w", encoding = "utf-8")
-
-    fout.write("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n")
-    fout.write("<!DOCTYPE book-part-wrapper PUBLIC \"-//NLM//DTD BITS Book Interchange DTD with OASIS and XHTML Tables v2.0 20151225//EN\" \"BITS-book-oasis2.dtd\">\n")
-    fout.write("<book-part-wrapper dtd-version=\"2.0\" xml:lang=\"en\" content-type=\""+paper_meta_vet[i]["section"]+"\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">\n")
-    fout.write("\t<collection-meta collection-type=\"book-series\">\n")
-    fout.write("\t\t<collection-id collection-id-type=\"doi\">10.1145/"+proc_type[int(params["type_ID"])]+"</collection-id>\n")
-    fout.write("\t\t<title-group>\n")
-    fout.write("\t\t\t<title>SBC Conferences</title>\n")
-    fout.write("\t\t</title-group>\n")
-    fout.write("\t</collection-meta>\n")
-    fout.write("\t<book-meta>\n")
-    fout.write("\t\t<book-id book-id-type=\"acm-id\">"+params["object_ID"]+"</book-id>\n")
-    fout.write("\t\t<book-id book-id-type=\"doi\">10.5753/"+params["proc_path"]+"."+params["proc_year"]+"</book-id>\n")
-
-    # Book title
-    fout.write("\t\t<book-title-group>\n")
-    fout.write("\t\t\t<book-title>"+params["issue_title"]+"</book-title>\n")
-    fout.write("\t\t\t<alt-title alt-title-type=\"acronym\">"+params["proc_acron"]+" "+params["proc_year"]+"</alt-title>\n")
-    fout.write("\t\t</book-title-group>\n")
-    fout.write("\t</book-meta>\n")
-
-    # Paper metadata
-    fout.write("\t<book-part book-part-type=\"chapter\" xml:lang=\"en\">\n")
-    fout.write("\t\t<book-part-meta>\n")
-    fout.write("\t\t\t<book-part-id book-part-id-type=\"acm-id\">"+params["object_ID"]+"</book-part-id>\n")
-    fout.write("\t\t\t<book-part-id book-part-id-type=\"doi\">10.5753/"+doi_ext+"</book-part-id>\n")
-
-    # Paper title
-    fout.write("\t\t\t<title-group>\n")
-    fout.write("\t\t\t\t<title>"+paper_meta_vet[i]["title"]+"</title>\n")
-    fout.write("\t\t\t</title-group>\n")
-
-    # Paper authors
-    output_paper_authors(fout, params, date_pub, paper_meta_vet, i)
-
-    # Paper dates
-    date_parts = paper_meta_vet[i]["pub_date"].split('-')
-    
-    fout.write("\t\t\t<pub-date date-type=\"publication\">\n")
-    fout.write("\t\t\t\t<day>"+date_parts[2]+"</day>\n")
-    fout.write("\t\t\t\t<month>"+date_parts[1]+"</month>\n")
-    fout.write("\t\t\t\t<year>"+date_parts[0]+"</year>\n")
-    fout.write("\t\t\t</pub-date>\n")
-    
-    # Paper pages
-    fout.write("\t\t\t<fpage>"+paper_meta_vet[i]["first_page"]+"</fpage>\n")
-    fout.write("\t\t\t<lpage>"+paper_meta_vet[i]["last_page"]+"</lpage>\n")
-
-    # Paper permissions
-    fout.write("\t\t\t<permissions>\n")
-    fout.write("\t\t\t\t<copyright-year>"+date_parts[0]+"</copyright-year>\n")
-    fout.write("\t\t\t\t<copyright-holder>Copyright held by the owner/author(s).</copyright-holder>\n")
-    fout.write("\t\t\t\t<license license-type=\"open-access\" xlink:href=\"https://creativecommons.org/licenses/by/4.0/\">\n")
-    fout.write("\t\t\t\t\t<license-p>This work is licensed under <ext-link ext-link-type=\"uri\" xlink:href=\"https://creativecommons.org/licenses/by/4.0/\">Creative Commons Attribution International 4.0</ext-link>.</license-p>\n")
-    fout.write("\t\t\t\t\t<ali:license_ref xmlns:ali=\"http://www.niso.org/schemas/ali/1.0/\">https://creativecommons.org/licenses/by/4.0/legalcode</ali:license_ref>\n")
-    fout.write("\t\t\t\t</license>\n")
-    fout.write("\t\t\t</permissions>\n")
-
-    # Paper PDF file
-
-    # Paper abstract
-    fout.write("\t\t\t<abstract>\n")
-    fout.write("\t\t\t\t<p>"+paper_meta_vet[i]["abstract"]+"</p>\n")
-    fout.write("\t\t\t</abstract>\n")
-
-    # Paper keywords
-    output_paper_keywords(fout, params, date_pub, paper_meta_vet, i)
-    
-    fout.write("\t\t</book-part-meta>\n")
-    
-    # Paper references
-    output_paper_references(fout, params, date_pub, paper_meta_vet, i)
-    
-
-    fout.write("\t</book-part>\n")
-    fout.write("</book-part-wrapper>\n")
-    fout.close()
+def load_params(filepath: str = "params.txt") -> dict:
+    """
+    Reads key=value pairs from *filepath* (one per line) and returns them as
+    a dict.  The separator is the first '=' on each line so that values may
+    contain '=' characters.
+    """
+    params = {}
+    with open(filepath, "r", encoding="utf-8") as fh:
+        for line in fh:
+            if "=" in line:
+                key, _, value = line.partition("=")
+                params[key.strip()] = value.rstrip("\n").strip()
+    return params
 
 
-def output_frontmatter(fout, paper_meta_vet, params):
+# ---------------------------------------------------------------------------
+# XML writers
+# ---------------------------------------------------------------------------
 
-    fout.write("\t<front-matter>\n")
-    fout.write("\t\t<toc>\n")
-    
-    for i in range(len(paper_meta_vet)):
-        if paper_meta_vet[i]["title"] != "Front Matter":
-            fout.write("\t\t\t<toc-entry>\n")
-            fout.write("\t\t\t\t<title>"+paper_meta_vet[i]["title"]+"</title>\n")
-            fout.write("\t\t\t\t<nav-pointer-group>\n")
-            fout.write("\t\t\t\t\t<nav-pointer>\n")
-            fout.write("\t\t\t\t\t\t<ext-link ext-link-type=\"doi\">"+paper_meta_vet[i]["doi"]+"</ext-link>\n")
+class XmlWriter:
+    """
+    Writes the BITS XML files required by the ACM Digital Library.
 
-            fout.write("\t\t\t\t\t</nav-pointer>\n")
-            fout.write("\t\t\t\t\t<nav-pointer content-type=\"label\" specific-use=\"pages\">"+paper_meta_vet[i]["pages"]+"</nav-pointer>\n")
-            fout.write("\t\t\t\t</nav-pointer-group>\n")
-            fout.write("\t\t\t</toc-entry>\n")
-            
-            output_paper_file(params, date_pub, paper_meta_vet, i)
+    Parameters
+    ----------
+    params : dict
+        Configuration loaded from params.txt.
+    root_path : str
+        Base output directory.
+    index_path : str
+        Directory for the main book XML file.
+    """
 
-    fout.write("\t\t</toc>\n")
-    fout.write("\t</front-matter>\n")
+    def __init__(self, params: dict, root_path: str, index_path: str):
+        self.params = params
+        self.root_path = root_path
+        self.index_path = index_path
+        self._type_id = int(params["type_ID"])
 
-def output_dates(fout,date):
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
-    fout.write("\t\t<pub-date date-type=\"publication\">\n")
-    fout.write("\t\t\t<day>"+date[0].strip()+"</day>\n")
-    fout.write("\t\t\t<month>"+date[1].strip()+"</month>\n")
-    fout.write("\t\t\t<year>"+date[2].strip()+"</year>\n")
-    fout.write("\t\t</pub-date>\n")
+    def _write_collection_meta(self, fh):
+        p = self.params
+        fh.write('\t<collection-meta collection-type="book-series">\n')
+        fh.write(f'\t\t<collection-id collection-id-type="doi">10.1145/{PROC_TYPES[self._type_id]}</collection-id>\n')
+        fh.write('\t\t<title-group>\n')
+        fh.write('\t\t\t<title>SBC Conferences</title>\n')
+        fh.write('\t\t</title-group>\n')
+        fh.write('\t</collection-meta>\n')
 
-def output_contributors(fout,contributors):
-    
-    fout.write("\t\t<contrib-group>\n")
-    
-    seq = 1
-    
-    for contributor in contributors:
-        parts = contributor.split(',')
-        role = parts[0]
-        givenname = parts[1]
-        surname = parts[2]
-        affil = parts[3]
-        email = parts[4]
-        
-        fout.write("\t\t\t<contrib contrib-type=\"other\" id=\"bkseq-"+str(seq).zfill(5)+"\">\n")
-        fout.write("\t\t\t\t<name>\n")
-        fout.write("\t\t\t\t\t<surname>"+surname+"</surname>\n")
-        fout.write("\t\t\t\t\t<given-names>"+givenname+"</given-names>\n")
-        fout.write("\t\t\t\t</name>\n")
-        fout.write("\t\t\t\t<aff>"+affil+"</aff>\n")
-        if email != '':
-            fout.write("\t\t\t\t<email>"+email+"</email>\n")
-        fout.write("\t\t\t\t<role>"+role+"</role>\n")
+    def _write_keywords(self, fh, paper: dict):
+        fh.write('\t\t\t<kwd-group>\n')
+        for kwd in paper["kwds"].split(","):
+            fh.write(f'\t\t\t\t<kwd>{kwd.strip()}</kwd>\n')
+        fh.write('\t\t\t</kwd-group>\n')
 
-        fout.write("\t\t\t</contrib>\n")
-        seq = seq + 1
-        
-    fout.write("\t\t</contrib-group>\n")
-    
+    def _write_references(self, fh, paper: dict):
+        fh.write('\t\t<back>\n')
+        fh.write('\t\t\t<ref-list specific-use="unparsed">\n')
+        seq = 1
+        for line in paper["refs"].splitlines():
+            line = line.replace("[link]", "").strip()
+            if line:
+                ref_id = str(seq).zfill(5)
+                fh.write(f'\t\t\t\t<ref id="ref-{ref_id}">\n')
+                fh.write(f'\t\t\t\t\t<mixed-citation>{html_escape(line)}</mixed-citation>\n')
+                fh.write('\t\t\t\t</ref>\n')
+                seq += 1
+        fh.write('\t\t\t</ref-list>\n')
+        fh.write('\t\t</back>\n')
 
-def output_main_file(params, date_pub, paper_meta_vet):
-    
-    fout = open(index_path+"/"+params["object_ID"]+".xml", "w", encoding = "utf-8")
-    
-    fout.write("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n")
-    fout.write("<!DOCTYPE book PUBLIC \"-//NLM//DTD BITS Book Interchange DTD with OASIS and XHTML Tables v2.0 20151225//EN\" \"BITS-book-oasis2.dtd\">\n")
-    fout.write("<book dtd-version=\"2.0\" xml:lang=\"en\" book-type=\""+book_type[int(params["type_ID"])]+"\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">\n")
-    fout.write("\t<collection-meta collection-type=\"book-series\">\n")
-    fout.write("\t\t<collection-id collection-id-type=\"doi\">10.1145/"+proc_type[int(params["type_ID"])]+"</collection-id>\n")
-    fout.write("\t\t<title-group>\n")
-    fout.write("\t\t\t<title>SBC Conferences</title>\n")
-    fout.write("\t\t</title-group>\n")
-    fout.write("\t</collection-meta>\n")
-    fout.write("\t<book-meta>\n")
-    fout.write("\t\t<book-id book-id-type=\"acm-id\">"+params["object_ID"]+"</book-id>\n")
-    fout.write("\t\t<book-id book-id-type=\"doi\">10.5753/"+params["proc_path"]+"."+params["proc_year"]+"</book-id>\n")
-    fout.write("\t\t<subj-group subj-group-type=\"conference-collections\">\n")
-    fout.write("\t\t\t<compound-subject>\n")
-    fout.write("\t\t\t\t<compound-subject-part content-type=\"code\">"+params["proc_path"]+"-mtg"+"</compound-subject-part>\n")
-    fout.write("\t\t\t\t<compound-subject-part content-type=\"text\">"+params["proc_acron"]+": "+params["proc_title"]+"</compound-subject-part>\n")
-    fout.write("\t\t\t</compound-subject>\n")
-    fout.write("\t\t</subj-group>\n")
-    
-    # Acceptance rates
-    fout.write("\t\t<subj-group subj-group-type=\"acceptance-rates\">\n")
-    fout.write("\t\t\t<compound-subject>\n")
-    fout.write("\t\t\t\t<compound-subject-part content-type=\"tract_type\">"+params["tract_type"]+"</compound-subject-part>\n")
-    fout.write("\t\t\t\t<compound-subject-part content-type=\"total_submitted\">"+params["total_submitted"]+"</compound-subject-part>\n")
-    fout.write("\t\t\t\t<compound-subject-part content-type=\"total_accepted\">"+params["total_accepted"]+"</compound-subject-part>\n")
-    fout.write("\t\t\t</compound-subject>\n")
-    fout.write("\t\t</subj-group>\n")
+    def _write_authors(self, fh, paper: dict):
+        fh.write('\t\t\t<contrib-group>\n')
+        for seq, (full_name, affil) in enumerate(
+            zip(paper["authors_list"], paper["affils_list"]), start=1
+        ):
+            name_parts = full_name.split()
+            surname = name_parts[-1]
+            given_names = " ".join(name_parts[:-1])
+            contrib_id = str(seq).zfill(5)
+            fh.write(f'\t\t\t\t<contrib contrib-type="author" corresp="no" id="artseq-{contrib_id}">\n')
+            fh.write('\t\t\t\t\t<name>\n')
+            fh.write(f'\t\t\t\t\t\t<surname>{surname}</surname>\n')
+            fh.write(f'\t\t\t\t\t\t<given-names>{given_names}</given-names>\n')
+            fh.write('\t\t\t\t\t</name>\n')
+            fh.write(f'\t\t\t\t\t<aff>{affil}</aff>\n')
+            fh.write('\t\t\t\t\t<role>Author</role>\n')
+            fh.write('\t\t\t\t</contrib>\n')
+        fh.write('\t\t\t</contrib-group>\n')
 
-    # Book title
-    fout.write("\t\t<book-title-group>\n")
-    fout.write("\t\t\t<book-title>"+params["issue_title"]+"</book-title>\n")
-    fout.write("\t\t\t<alt-title alt-title-type=\"acronym\">"+params["proc_acron"]+" "+params["proc_year"]+"</alt-title>\n")
-    fout.write("\t\t</book-title-group>\n")
-    
-    output_contributors(fout,params["contributors"].split(';'))
-    output_dates(fout,date_pub.split('/'))
-    
-    fout.write("\t\t<publisher>\n")
-    fout.write("\t\t\t<publisher-name>SBC - Brazilian Computer Society</publisher-name>\n")
-    fout.write("\t\t\t<publisher-name specific-use=\"publisher-id db-only\">PUB6784</publisher-name>\n")
-    fout.write("\t\t\t<publisher-loc>Porto Alegre, RS, Brazil</publisher-loc>\n")
-    fout.write("\t\t</publisher>\n")
-    fout.write("\t\t<permissions>\n")
-    fout.write("\t\t\t<copyright-year>"+params["proc_year"]+"</copyright-year>\n")
-    fout.write("\t\t</permissions>\n")
-    if params["has_FM"] == "yes":
-        fout.write("\t\t<self-uri content-type=\"fm-pdf\" xlink:href=\""+params["object_ID"]+".fm.pdf\">Front matter (Title page, Contents, Welcome, Author index)</self-uri>\n")    
-    if params["has_Full"] == "yes":
-        fout.write("\t\t<self-uri content-type=\"pdf\" xlink:href=\""+params["object_ID"]+".pdf\">"+params["proc_acron"]+" "+params["proc_year"]+"</self-uri>\n")    
-    fout.write("\t\t<abstract>\n")
-    fout.write("\t\t\t<p>"+params["proc_abstract"]+"</p>\n")
-    fout.write("\t\t</abstract>\n")
+    def _write_pub_date(self, fh, date_str: str, indent: str = "\t\t"):
+        day, month, year = date_str.split("-")
+        fh.write(f'{indent}<pub-date date-type="publication">\n')
+        fh.write(f'{indent}\t<day>{day.strip()}</day>\n')
+        fh.write(f'{indent}\t<month>{month.strip()}</month>\n')
+        fh.write(f'{indent}\t<year>{year.strip()}</year>\n')
+        fh.write(f'{indent}</pub-date>\n')
 
-    fout.write("\t\t<conference>\n")
-    conf_date = params["start_year"]+"-"+params["start_month"]+"-"+params["start_day"]
-    fout.write("\t\t\t<conf-date iso-8601-date=\""+conf_date+"\">\n")
-    fout.write("\t\t\t\t<day content-type=\"start-day\">"+params["start_day"]+"</day>\n")
-    fout.write("\t\t\t\t<month content-type=\"start-month\">"+params["start_month"]+"</month>\n")
-    fout.write("\t\t\t\t<year content-type=\"start-year\">"+params["start_year"]+"</year>\n")
-    fout.write("\t\t\t\t<day content-type=\"end-day\">"+params["end_day"]+"</day>\n")
-    fout.write("\t\t\t\t<month content-type=\"end-month\">"+params["end_month"]+"</month>\n")
-    fout.write("\t\t\t\t<year content-type=\"end-year\">"+params["end_year"]+"</year>\n")
-    fout.write("\t\t\t</conf-date>\n")
-    fout.write("\t\t\t<conf-name><ext-link ext-link-type=\"url\" xlink:href=\""+params["conf_site"]+"\">"+params["proc_acron"]+" "+params["proc_year"]+"</ext-link>: "+params["conf_name"]+"</conf-name>\n")
-    fout.write("\t\t\t<conf-loc>\n")
-    fout.write("\t\t\t\t<institution>"+params["conf_inst"]+"</institution>\n")
-    fout.write("\t\t\t\t<city>"+params["conf_city"]+"</city>\n")
-    fout.write("\t\t\t\t<country>"+params["conf_country"]+"</country>\n")
-    fout.write("\t\t\t</conf-loc>\n")
-    fout.write("\t\t\t<conf-acronym>"+params["proc_acron"]+" "+params["proc_year"]+"</conf-acronym>\n")
+    # ------------------------------------------------------------------
+    # Per-paper XML
+    # ------------------------------------------------------------------
 
-    fout.write("\t\t</conference>\n")
-    
-    fout.write("\t\t<counts><book-page-count count=\""+params["proc_pages"]+"\" /></counts>\n")
+    def write_paper_file(self, paper: dict, date_pub: str):
+        """Writes the BITS XML file for a single article."""
+        p = self.params
+        doi_suffix = paper["doi"].split("/")[1]
+        paper_dir = Path(self.root_path) / doi_suffix
+        paper_dir.mkdir(parents=True, exist_ok=True)
 
-    fout.write("\t</book-meta>\n")
-    
-    output_frontmatter(fout, paper_meta_vet, params)
-        
-    fout.write("</book>\n")
-    fout.close()
-    
+        output_file = paper_dir / f"{doi_suffix}.xml"
+        date_parts = paper["pub_date"].split("-")
 
-proc_type = ["acmconferences", "acmotherconferences", "dlproceedings", "guideproceedings", "sbcconferences"]
-book_type = ["ACM Conferences", "ACM Other Conferences", "DL Proceedings", "Guide Proceedings", "SBC Conferences"]
+        with open(output_file, "w", encoding="utf-8") as fh:
+            fh.write('<?xml version="1.0" encoding="utf-8"?>\n')
+            fh.write('<!DOCTYPE book-part-wrapper PUBLIC "-//NLM//DTD BITS Book Interchange DTD with OASIS and XHTML Tables v2.0 20151225//EN" "BITS-book-oasis2.dtd">\n')
+            fh.write(f'<book-part-wrapper dtd-version="2.0" xml:lang="en" content-type="{paper["section"]}" xmlns:xlink="http://www.w3.org/1999/xlink">\n')
 
-params = get_params()
+            self._write_collection_meta(fh)
 
-datestamp = datetime.now().strftime("%Y%m%d")
+            fh.write('\t<book-meta>\n')
+            fh.write(f'\t\t<book-id book-id-type="acm-id">{p["object_ID"]}</book-id>\n')
+            fh.write(f'\t\t<book-id book-id-type="doi">10.5753/{p["proc_path"]}.{p["proc_year"]}</book-id>\n')
+            fh.write('\t\t<book-title-group>\n')
+            fh.write(f'\t\t\t<book-title>{p["issue_title"]}</book-title>\n')
+            fh.write(f'\t\t\t<alt-title alt-title-type="acronym">{p["proc_acron"]} {p["proc_year"]}</alt-title>\n')
+            fh.write('\t\t</book-title-group>\n')
+            fh.write('\t</book-meta>\n')
 
-root_path = proc_type[int(params["type_ID"])] + "_" + params["object_ID"] + "_" + datestamp + "/" + params["object_ID"]
-index_path = root_path+"/"+params["object_ID"]
+            fh.write('\t<book-part book-part-type="chapter" xml:lang="en">\n')
+            fh.write('\t\t<book-part-meta>\n')
+            fh.write(f'\t\t\t<book-part-id book-part-id-type="acm-id">{p["object_ID"]}</book-part-id>\n')
+            fh.write(f'\t\t\t<book-part-id book-part-id-type="doi">10.5753/{doi_suffix}</book-part-id>\n')
+            fh.write('\t\t\t<title-group>\n')
+            fh.write(f'\t\t\t\t<title>{paper["title"]}</title>\n')
+            fh.write('\t\t\t</title-group>\n')
 
-Path(root_path).mkdir(parents=True, exist_ok=True)
-Path(index_path).mkdir(parents=True, exist_ok=True)
+            self._write_authors(fh, paper)
+
+            # Publication date (YYYY-MM-DD → day/month/year)
+            fh.write('\t\t\t<pub-date date-type="publication">\n')
+            fh.write(f'\t\t\t\t<day>{date_parts[2]}</day>\n')
+            fh.write(f'\t\t\t\t<month>{date_parts[1]}</month>\n')
+            fh.write(f'\t\t\t\t<year>{date_parts[0]}</year>\n')
+            fh.write('\t\t\t</pub-date>\n')
+
+            fh.write(f'\t\t\t<fpage>{paper["first_page"]}</fpage>\n')
+            fh.write(f'\t\t\t<lpage>{paper["last_page"]}</lpage>\n')
+
+            fh.write('\t\t\t<permissions>\n')
+            fh.write(f'\t\t\t\t<copyright-year>{date_parts[0]}</copyright-year>\n')
+            fh.write('\t\t\t\t<copyright-holder>Copyright held by the owner/author(s).</copyright-holder>\n')
+            fh.write('\t\t\t\t<license license-type="open-access" xlink:href="https://creativecommons.org/licenses/by/4.0/">\n')
+            fh.write('\t\t\t\t\t<license-p>This work is licensed under <ext-link ext-link-type="uri" xlink:href="https://creativecommons.org/licenses/by/4.0/">Creative Commons Attribution International 4.0</ext-link>.</license-p>\n')
+            fh.write('\t\t\t\t\t<ali:license_ref xmlns:ali="http://www.niso.org/schemas/ali/1.0/">https://creativecommons.org/licenses/by/4.0/legalcode</ali:license_ref>\n')
+            fh.write('\t\t\t\t</license>\n')
+            fh.write('\t\t\t</permissions>\n')
+
+            fh.write('\t\t\t<abstract>\n')
+            fh.write(f'\t\t\t\t<p>{paper["abstract"]}</p>\n')
+            fh.write('\t\t\t</abstract>\n')
+
+            self._write_keywords(fh, paper)
+
+            fh.write('\t\t</book-part-meta>\n')
+            self._write_references(fh, paper)
+            fh.write('\t</book-part>\n')
+            fh.write('</book-part-wrapper>\n')
+
+    # ------------------------------------------------------------------
+    # Front matter (TOC) — written inline into the main file
+    # ------------------------------------------------------------------
+
+    def _write_front_matter(self, fh, papers: list[dict], date_pub: str):
+        fh.write('\t<front-matter>\n')
+        fh.write('\t\t<toc>\n')
+        for paper in papers:
+            if paper["title"] == "Front Matter":
+                continue
+            fh.write('\t\t\t<toc-entry>\n')
+            fh.write(f'\t\t\t\t<title>{paper["title"]}</title>\n')
+            fh.write('\t\t\t\t<nav-pointer-group>\n')
+            fh.write('\t\t\t\t\t<nav-pointer>\n')
+            fh.write(f'\t\t\t\t\t\t<ext-link ext-link-type="doi">{paper["doi"]}</ext-link>\n')
+            fh.write('\t\t\t\t\t</nav-pointer>\n')
+            fh.write(f'\t\t\t\t\t<nav-pointer content-type="label" specific-use="pages">{paper["pages"]}</nav-pointer>\n')
+            fh.write('\t\t\t\t</nav-pointer-group>\n')
+            fh.write('\t\t\t</toc-entry>\n')
+            self.write_paper_file(paper, date_pub)
+        fh.write('\t\t</toc>\n')
+        fh.write('\t</front-matter>\n')
+
+    def _write_contributors(self, fh, contributors_str: str):
+        fh.write('\t\t<contrib-group>\n')
+        for seq, contributor in enumerate(contributors_str.split(";"), start=1):
+            parts = contributor.split(",")
+            role, given_name, surname, affil, email = parts
+            contrib_id = str(seq).zfill(5)
+            fh.write(f'\t\t\t<contrib contrib-type="other" id="bkseq-{contrib_id}">\n')
+            fh.write('\t\t\t\t<name>\n')
+            fh.write(f'\t\t\t\t\t<surname>{surname}</surname>\n')
+            fh.write(f'\t\t\t\t\t<given-names>{given_name}</given-names>\n')
+            fh.write('\t\t\t\t</name>\n')
+            fh.write(f'\t\t\t\t<aff>{affil}</aff>\n')
+            if email:
+                fh.write(f'\t\t\t\t<email>{email}</email>\n')
+            fh.write(f'\t\t\t\t<role>{role}</role>\n')
+            fh.write('\t\t\t</contrib>\n')
+        fh.write('\t\t</contrib-group>\n')
+
+    # ------------------------------------------------------------------
+    # Main book XML
+    # ------------------------------------------------------------------
+
+    def write_main_file(self, papers: list[dict], date_pub: str):
+        """Writes the top-level book XML file that references all articles."""
+        p = self.params
+        output_file = Path(self.index_path) / f"{p['object_ID']}.xml"
+
+        with open(output_file, "w", encoding="utf-8") as fh:
+            fh.write('<?xml version="1.0" encoding="utf-8"?>\n')
+            fh.write('<!DOCTYPE book PUBLIC "-//NLM//DTD BITS Book Interchange DTD with OASIS and XHTML Tables v2.0 20151225//EN" "BITS-book-oasis2.dtd">\n')
+            fh.write(f'<book dtd-version="2.0" xml:lang="en" book-type="{BOOK_TYPES[self._type_id]}" xmlns:xlink="http://www.w3.org/1999/xlink">\n')
+
+            self._write_collection_meta(fh)
+
+            fh.write('\t<book-meta>\n')
+            fh.write(f'\t\t<book-id book-id-type="acm-id">{p["object_ID"]}</book-id>\n')
+            fh.write(f'\t\t<book-id book-id-type="doi">10.5753/{p["proc_path"]}.{p["proc_year"]}</book-id>\n')
+
+            # Conference collections
+            fh.write('\t\t<subj-group subj-group-type="conference-collections">\n')
+            fh.write('\t\t\t<compound-subject>\n')
+            fh.write(f'\t\t\t\t<compound-subject-part content-type="code">{p["proc_path"]}-mtg</compound-subject-part>\n')
+            fh.write(f'\t\t\t\t<compound-subject-part content-type="text">{p["proc_acron"]}: {p["proc_title"]}</compound-subject-part>\n')
+            fh.write('\t\t\t</compound-subject>\n')
+            fh.write('\t\t</subj-group>\n')
+
+            # Acceptance rates
+            fh.write('\t\t<subj-group subj-group-type="acceptance-rates">\n')
+            fh.write('\t\t\t<compound-subject>\n')
+            fh.write(f'\t\t\t\t<compound-subject-part content-type="tract_type">{p["tract_type"]}</compound-subject-part>\n')
+            fh.write(f'\t\t\t\t<compound-subject-part content-type="total_submitted">{p["total_submitted"]}</compound-subject-part>\n')
+            fh.write(f'\t\t\t\t<compound-subject-part content-type="total_accepted">{p["total_accepted"]}</compound-subject-part>\n')
+            fh.write('\t\t\t</compound-subject>\n')
+            fh.write('\t\t</subj-group>\n')
+
+            # Book title
+            fh.write('\t\t<book-title-group>\n')
+            fh.write(f'\t\t\t<book-title>{p["issue_title"]}</book-title>\n')
+            fh.write(f'\t\t\t<alt-title alt-title-type="acronym">{p["proc_acron"]} {p["proc_year"]}</alt-title>\n')
+            fh.write('\t\t</book-title-group>\n')
+
+            self._write_contributors(fh, p["contributors"])
+
+            # Publication date (format from params: DD/MM/YYYY)
+            day, month, year = date_pub.split("/")
+            fh.write('\t\t<pub-date date-type="publication">\n')
+            fh.write(f'\t\t\t<day>{day.strip()}</day>\n')
+            fh.write(f'\t\t\t<month>{month.strip()}</month>\n')
+            fh.write(f'\t\t\t<year>{year.strip()}</year>\n')
+            fh.write('\t\t</pub-date>\n')
+
+            fh.write('\t\t<publisher>\n')
+            fh.write('\t\t\t<publisher-name>SBC - Brazilian Computer Society</publisher-name>\n')
+            fh.write('\t\t\t<publisher-name specific-use="publisher-id db-only">PUB6784</publisher-name>\n')
+            fh.write('\t\t\t<publisher-loc>Porto Alegre, RS, Brazil</publisher-loc>\n')
+            fh.write('\t\t</publisher>\n')
+
+            fh.write('\t\t<permissions>\n')
+            fh.write(f'\t\t\t<copyright-year>{p["proc_year"]}</copyright-year>\n')
+            fh.write('\t\t</permissions>\n')
+
+            if p.get("has_FM") == "yes":
+                fh.write(f'\t\t<self-uri content-type="fm-pdf" xlink:href="{p["object_ID"]}.fm.pdf">Front matter (Title page, Contents, Welcome, Author index)</self-uri>\n')
+            if p.get("has_Full") == "yes":
+                fh.write(f'\t\t<self-uri content-type="pdf" xlink:href="{p["object_ID"]}.pdf">{p["proc_acron"]} {p["proc_year"]}</self-uri>\n')
+
+            fh.write('\t\t<abstract>\n')
+            fh.write(f'\t\t\t<p>{p["proc_abstract"]}</p>\n')
+            fh.write('\t\t</abstract>\n')
+
+            # Conference info
+            conf_date = f'{p["start_year"]}-{p["start_month"]}-{p["start_day"]}'
+            fh.write('\t\t<conference>\n')
+            fh.write(f'\t\t\t<conf-date iso-8601-date="{conf_date}">\n')
+            fh.write(f'\t\t\t\t<day content-type="start-day">{p["start_day"]}</day>\n')
+            fh.write(f'\t\t\t\t<month content-type="start-month">{p["start_month"]}</month>\n')
+            fh.write(f'\t\t\t\t<year content-type="start-year">{p["start_year"]}</year>\n')
+            fh.write(f'\t\t\t\t<day content-type="end-day">{p["end_day"]}</day>\n')
+            fh.write(f'\t\t\t\t<month content-type="end-month">{p["end_month"]}</month>\n')
+            fh.write(f'\t\t\t\t<year content-type="end-year">{p["end_year"]}</year>\n')
+            fh.write('\t\t\t</conf-date>\n')
+            fh.write(f'\t\t\t<conf-name><ext-link ext-link-type="url" xlink:href="{p["conf_site"]}">{p["proc_acron"]} {p["proc_year"]}</ext-link>: {p["conf_name"]}</conf-name>\n')
+            fh.write('\t\t\t<conf-loc>\n')
+            fh.write(f'\t\t\t\t<institution>{p["conf_inst"]}</institution>\n')
+            fh.write(f'\t\t\t\t<city>{p["conf_city"]}</city>\n')
+            fh.write(f'\t\t\t\t<country>{p["conf_country"]}</country>\n')
+            fh.write('\t\t\t</conf-loc>\n')
+            fh.write(f'\t\t\t<conf-acronym>{p["proc_acron"]} {p["proc_year"]}</conf-acronym>\n')
+            fh.write('\t\t</conference>\n')
+
+            fh.write(f'\t\t<counts><book-page-count count="{p["proc_pages"]}" /></counts>\n')
+            fh.write('\t</book-meta>\n')
+
+            self._write_front_matter(fh, papers, date_pub)
+
+            fh.write('</book>\n')
 
 
-paper_ids = []
-paper_pgs = []
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
-base__link = "https://sol.sbc.org.br/index.php/"+params["proc_path"]
-issue_link = base__link+"/issue/view/"+params["proc_ID"]
+def main():
+    params = load_params("params.txt")
+    datestamp = datetime.now().strftime("%Y%m%d")
 
-papers_vet, pages_vet, date_pub = get_paper_ids_in_volume(issue_link)
-print("href: " + issue_link)
-print("publicado em: " + date_pub)
-paper_ids.extend(papers_vet)
-paper_pgs.extend(pages_vet)
+    type_id = int(params["type_ID"])
+    root_path = f"{PROC_TYPES[type_id]}_{params['object_ID']}_{datestamp}/{params['object_ID']}"
+    index_path = f"{root_path}/{params['object_ID']}"
 
-paper_meta_vet = []
+    Path(root_path).mkdir(parents=True, exist_ok=True)
+    Path(index_path).mkdir(parents=True, exist_ok=True)
 
-k_paper = 0
-for i in range(len(paper_ids)):
-    paper_meta = check_article(params["proc_path"], paper_ids[i], paper_pgs[i])
-    paper_meta_vet.append(paper_meta)
-    k_paper = k_paper + 1
-    
-print(str(k_paper) + " artigos localizados")
+    paper_ids, page_ranges, date_pub = get_issue_paper_ids(
+        params["proc_path"], params["proc_ID"]
+    )
 
-print("Tamanho de vetor é "+str(len(paper_meta_vet)))
+    papers = []
+    for submission_id, pages in zip(paper_ids, page_ranges):
+        paper = scrape_article(params["proc_path"], submission_id, pages)
+        papers.append(paper)
 
-Path(root_path).mkdir(parents=True, exist_ok=True)
+    print(f"\n{len(papers)} article(s) collected.")
 
-output_main_file(params, date_pub, paper_meta_vet)
+    writer = XmlWriter(params, root_path, index_path)
+    writer.write_main_file(papers, date_pub)
+    print("Done. XML files written to:", root_path)
 
+
+if __name__ == "__main__":
+    main()
