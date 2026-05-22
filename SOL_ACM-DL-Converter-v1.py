@@ -8,6 +8,7 @@ the XML files required for import into the ACM Digital Library.
 """
 
 import requests
+import time
 from requests.exceptions import RequestException
 from bs4 import BeautifulSoup
 from pathlib import Path
@@ -144,12 +145,14 @@ def scrape_article(proc_path: str, submission_id: str, pages: str) -> dict:
         "pages": pages.strip(),
         "authors_list": [],
         "affils_list": [],
+        "orcids_list": [],
         "refs": "",
         "kwds": "",
         "abstract": "",
         "abstract_alt": "",
         "title_alt": "",
         "doi": None,
+        "url": None,
     }
     section_raw = ""
 
@@ -183,6 +186,8 @@ def scrape_article(proc_path: str, submission_id: str, pages: str) -> dict:
             meta["first_page"] = content
         elif name == "citation_lastpage":
             meta["last_page"] = content
+        elif name == "citation_pdf_url":
+            meta["url"] = content
 
     meta["section"] = SECTION_MAP.get(section_raw.strip(), DEFAULT_SECTION)
     meta["title"] = meta.get("title", "").strip()
@@ -203,6 +208,23 @@ def scrape_article(proc_path: str, submission_id: str, pages: str) -> dict:
         val_span = kwd_div.find("span", class_="value")
         if val_span:
             meta["kwds"] = val_span.text
+
+    orc_div = soup.find("div", class_="main_entry")
+    if orc_div:
+        orc_ul = orc_div.find("ul", class_="item authors")
+        if orc_ul:
+            auts = orc_ul.find_all("li")
+            if auts:
+                for aut in auts:
+                    if aut:
+                        orc = aut.find("span", class_="orcid")
+                        if orc:
+                            orc_a = orc.find("a")
+                            if orc_a:
+                                orcid_aut = orc_a.text.strip()
+                                meta["orcids_list"].append(orcid_aut)
+                    else:
+                        meta["orcids_list"].append("")
 
     return meta
 
@@ -286,14 +308,16 @@ class XmlWriter:
 
     def _write_authors(self, fh, paper: dict):
         fh.write('\t\t\t<contrib-group>\n')
-        for seq, (full_name, affil) in enumerate(
-            zip(paper["authors_list"], paper["affils_list"]), start=1
+        for seq, (full_name, affil, orc) in enumerate(
+            zip(paper["authors_list"], paper["affils_list"], paper["orcids_list"]), start=1
         ):
             name_parts = full_name.split()
             surname = name_parts[-1]
             given_names = " ".join(name_parts[:-1])
             contrib_id = str(seq).zfill(5)
             fh.write(f'\t\t\t\t<contrib contrib-type="author" corresp="no" id="artseq-{contrib_id}">\n')
+            if orc != '':
+                fh.write(f'\t\t\t\t\t<contrib-id contrib-id-type="orcid">{orc}</contrib-id>\n')
             fh.write('\t\t\t\t\t<name>\n')
             fh.write(f'\t\t\t\t\t\t<surname>{surname}</surname>\n')
             fh.write(f'\t\t\t\t\t\t<given-names>{given_names}</given-names>\n')
@@ -545,6 +569,7 @@ def main():
     for submission_id, pages in zip(paper_ids, page_ranges):
         paper = scrape_article(params["proc_path"], submission_id, pages)
         papers.append(paper)
+        time.sleep(2.5)
 
     print(f"\n{len(papers)} article(s) collected.")
 
