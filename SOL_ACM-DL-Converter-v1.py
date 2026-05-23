@@ -8,7 +8,6 @@ the XML files required for import into the ACM Digital Library.
 """
 
 import requests
-import time
 from requests.exceptions import RequestException
 from bs4 import BeautifulSoup
 from pathlib import Path
@@ -249,6 +248,29 @@ def load_params(filepath: str = "params.txt") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Writer PDF
+# ---------------------------------------------------------------------------
+
+def save_pdf(root_path, paper: dict, date_pub: str):
+    """
+    Downloads an saves a PDF file corresponding to an article.
+    """
+    doi_suffix = paper["doi"].split("/")[1]
+    paper_dir = Path(root_path) / doi_suffix
+    paper_dir.mkdir(parents=True, exist_ok=True)
+
+    output_file = paper_dir / f"{doi_suffix}.pdf"
+    
+    print(paper["url"])
+    print(output_file)
+
+    response = requests.get(paper["url"])
+    output_file.write_bytes(response.content)
+    return output_file
+
+
+
+# ---------------------------------------------------------------------------
 # XML writers
 # ---------------------------------------------------------------------------
 
@@ -425,6 +447,7 @@ class XmlWriter:
             fh.write('\t\t\t\t</nav-pointer-group>\n')
             fh.write('\t\t\t</toc-entry>\n')
             self.write_paper_file(paper, date_pub)
+            save_pdf(self.root_path, paper, date_pub)
         fh.write('\t\t</toc>\n')
         fh.write('\t</front-matter>\n')
 
@@ -569,7 +592,6 @@ def main():
     for submission_id, pages in zip(paper_ids, page_ranges):
         paper = scrape_article(params["proc_path"], submission_id, pages)
         papers.append(paper)
-        time.sleep(2.5)
 
     print(f"\n{len(papers)} article(s) collected.")
 
