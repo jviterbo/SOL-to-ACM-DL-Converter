@@ -8,10 +8,16 @@ the XML files required for import into the ACM Digital Library.
 """
 
 import requests
+import pymupdf
+import warnings
+
 from requests.exceptions import RequestException
 from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime
+from pypdf import PdfWriter
+from pdfnumbering import PdfNumberer
+from fpdf import Align
 
 
 # ---------------------------------------------------------------------------
@@ -101,14 +107,14 @@ def get_issue_paper_ids(proc_path: str, proc_id: str) -> tuple[list, list, str]:
       - publication date string
     """
     issue_url = f"{SOL_BASE_URL}/{proc_path}/issue/view/{proc_id}"
-    print(f"Fetching issue index: {issue_url}")
+    print(f"\nFetching issue at: {issue_url}")
 
     soup = parse_html(issue_url)
 
     date_pub = (
         soup.find("div", class_="published")
         .find("span", class_="value")
-        .string
+        .string.strip()
     )
 
     paper_ids, page_ranges = [], []
@@ -125,7 +131,7 @@ def get_issue_paper_ids(proc_path: str, proc_id: str) -> tuple[list, list, str]:
                 pages_div.string.strip() if pages_div else "no page number"
             )
 
-    print(f"Found {len(paper_ids)} articles. Published: {date_pub}")
+    print(f"* Total of {len(paper_ids)} articles. Published: {date_pub}")
     return paper_ids, page_ranges, date_pub
 
 
@@ -135,7 +141,7 @@ def scrape_article(proc_path: str, submission_id: str, pages: str) -> dict:
     all metadata needed to build the ACM-DL XML files.
     """
     url = f"{SOL_BASE_URL}/{proc_path}/article/view/{submission_id}"
-    print(f"  Scraping: {url}")
+    print(f"Scraping: {url}")
 
     soup = parse_html(url)
 
@@ -215,6 +221,7 @@ def scrape_article(proc_path: str, submission_id: str, pages: str) -> dict:
             auts = orc_ul.find_all("li")
             if auts:
                 for aut in auts:
+                    orcid_aut = ""
                     if aut:
                         orc = aut.find("span", class_="orcid")
                         if orc:
@@ -222,10 +229,24 @@ def scrape_article(proc_path: str, submission_id: str, pages: str) -> dict:
                             if orc_a:
                                 orcid_aut = orc_a.text.strip()
                                 meta["orcids_list"].append(orcid_aut)
-                    else:
-                        meta["orcids_list"].append("")
+                    meta["orcids_list"].append(orcid_aut)
 
     return meta
+
+
+
+# ---------------------------------------------------------------------------
+# Update params file
+# ---------------------------------------------------------------------------
+
+def update_params(filepath, key, val) -> dict:
+    """
+    Writes new key=value pair in *filepath*.
+    """
+    param_file = open(filepath, "a", encoding="utf-8")
+    param_file.write(f'{key}={val}\n')
+    param_file.close()
+
 
 
 # ---------------------------------------------------------------------------
@@ -248,25 +269,84 @@ def load_params(filepath: str = "params.txt") -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Writer PDF
+# PDF Writers
 # ---------------------------------------------------------------------------
 
-def save_pdf(root_path, paper: dict, date_pub: str):
+def write_paper_pdf(root_path, params, paper: dict, date_pub: str):
     """
     Downloads an saves a PDF file corresponding to an article.
     """
+    suffix = params["object_ID"]
     doi_suffix = paper["doi"].split("/")[1]
     paper_dir = Path(root_path) / doi_suffix
     paper_dir.mkdir(parents=True, exist_ok=True)
-
     output_file = paper_dir / f"{doi_suffix}.pdf"
-    
-    print(paper["url"])
-    print(output_file)
-
+    full_file = Path(root_path) / suffix / f"{suffix}.pdf"
     response = requests.get(paper["url"])
     output_file.write_bytes(response.content)
-    return output_file
+    
+    numberer = PdfNumberer(
+        first_number=int(paper["first_page"]),
+        ignore_pages=(),
+        skip_pages=(),
+        stamp_format="{}",
+        font_size=9,
+        font_family="Helvetica",
+        text_color=(0x18, 0x18, 0x18),
+        text_align=Align.C,
+        text_position=(0, -1),
+        page_margin=(28, 28),
+    )
+
+    pdf = PdfWriter(clone_from=output_file)
+    #p_tot = str(len(pdf.pages))
+    numberer.add_page_numbering(pdf.pages)
+    pdf.write(output_file)
+    print(f"* Wrote {doi_suffix}.pdf.")
+    
+    pdf = pymupdf.open(output_file)
+    for page in pdf:
+        header_text = "DOI: "+"https://doi.org/"+paper["doi"]
+        page.insert_text((50, 30), header_text, fontsize=9, color=(0, 0, 0))
+        
+    pdf.save(output_file, incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+    pdf.close()
+    
+    pdf_list = []
+    pdf_list.append(full_file)
+    pdf_list.append(output_file)
+    merger = PdfWriter()
+    
+    for pdf in pdf_list:
+        merger.append(pdf)
+    
+    merger.write(full_file)
+    merger.close()
+
+
+
+def write_fm_pdf(root_path, params, paper: dict):
+    """
+    Downloads an saves a PDF file corresponding to the Front Matter.
+    """
+    suffix = params["object_ID"]
+    paper_dir = Path(root_path) / suffix
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    fm_file = paper_dir / f"{suffix}.fm.pdf"
+    full_file = paper_dir / f"{suffix}.pdf"
+    response = requests.get(paper["url"])
+    fm_file.write_bytes(response.content)
+    
+    
+    pdf = pymupdf.open(fm_file)
+    for page in pdf:
+        header_text = "DOI: "+"https://doi.org/"+params["doi_prefix"]+"/"+params["object_ID"]
+        page.insert_text((50, 40), header_text, fontsize=14, color=(0, 0, 0.8))
+        break
+        
+    pdf.save(fm_file, incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+    pdf.save(full_file)
+    pdf.close()
 
 
 
@@ -344,7 +424,12 @@ class XmlWriter:
             fh.write(f'\t\t\t\t\t\t<surname>{surname}</surname>\n')
             fh.write(f'\t\t\t\t\t\t<given-names>{given_names}</given-names>\n')
             fh.write('\t\t\t\t\t</name>\n')
-            fh.write(f'\t\t\t\t\t<aff>{affil}</aff>\n')
+            insts = load_params("insts.txt")
+            if affil in insts:
+                fh.write(f'\t\t\t\t\t<aff>{insts[affil]}</aff>\n')
+            else:
+                fh.write(f'\t\t\t\t\t<aff>{affil}</aff>\n')
+                update_params("insts.txt", affil, affil) 
             fh.write('\t\t\t\t\t<role>Author</role>\n')
             fh.write('\t\t\t\t</contrib>\n')
         fh.write('\t\t\t</contrib-group>\n')
@@ -361,7 +446,7 @@ class XmlWriter:
     # Per-paper XML
     # ------------------------------------------------------------------
 
-    def write_paper_file(self, paper: dict, date_pub: str):
+    def write_paper_xml(self, paper: dict, date_pub: str):
         """Writes the BITS XML file for a single article."""
         p = self.params
         doi_suffix = paper["doi"].split("/")[1]
@@ -427,6 +512,8 @@ class XmlWriter:
             fh.write('\t</book-part>\n')
             fh.write('</book-part-wrapper>\n')
 
+        print(f"* Wrote {doi_suffix}.xml.")
+
     # ------------------------------------------------------------------
     # Front matter (TOC) — written inline into the main file
     # ------------------------------------------------------------------
@@ -436,6 +523,7 @@ class XmlWriter:
         fh.write('\t\t<toc>\n')
         for paper in papers:
             if paper["title"] == "Front Matter":
+                write_fm_pdf(self.root_path, self.params, paper)
                 continue
             fh.write('\t\t\t<toc-entry>\n')
             fh.write(f'\t\t\t\t<title>{paper["title"]}</title>\n')
@@ -446,8 +534,8 @@ class XmlWriter:
             fh.write(f'\t\t\t\t\t<nav-pointer content-type="label" specific-use="pages">{paper["pages"]}</nav-pointer>\n')
             fh.write('\t\t\t\t</nav-pointer-group>\n')
             fh.write('\t\t\t</toc-entry>\n')
-            self.write_paper_file(paper, date_pub)
-            save_pdf(self.root_path, paper, date_pub)
+            self.write_paper_xml(paper, date_pub)
+            write_paper_pdf(self.root_path, self.params, paper, date_pub)
         fh.write('\t\t</toc>\n')
         fh.write('\t</front-matter>\n')
 
@@ -574,7 +662,10 @@ class XmlWriter:
 # ---------------------------------------------------------------------------
 
 def main():
-    params = load_params("params.txt")
+    
+    warnings.filterwarnings("ignore")
+
+    params = load_params("params-1569.txt")
     datestamp = datetime.now().strftime("%Y%m%d")
 
     type_id = int(params["type_ID"])
@@ -593,7 +684,7 @@ def main():
         paper = scrape_article(params["proc_path"], submission_id, pages)
         papers.append(paper)
 
-    print(f"\n{len(papers)} article(s) collected.")
+    print(f"\n->{len(papers)} article(s) collected.")
 
     writer = XmlWriter(params, root_path, index_path)
     writer.write_main_file(papers, date_pub)
