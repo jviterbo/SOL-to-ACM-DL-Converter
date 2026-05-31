@@ -8,6 +8,7 @@ the XML files required for import into the ACM Digital Library.
 """
 
 import requests
+import time
 import pymupdf
 import warnings
 
@@ -39,7 +40,7 @@ BOOK_TYPES = [
     "ACM Other Conferences",
     "DL Proceedings",
     "Guide Proceedings",
-    "SBC Conferences",
+    "conference-proceedings",
 ]
 
 SECTION_MAP = {
@@ -381,7 +382,7 @@ class XmlWriter:
     def _write_collection_meta(self, fh):
         p = self.params
         fh.write('\t<collection-meta collection-type="book-series">\n')
-        fh.write(f'\t\t<collection-id collection-id-type="doi">10.1145/{PROC_TYPES[self._type_id]}</collection-id>\n')
+        fh.write(f'\t\t<collection-id collection-id-type="doi">10.5753/{PROC_TYPES[self._type_id]}</collection-id>\n')
         fh.write('\t\t<title-group>\n')
         fh.write('\t\t\t<title>SBC Conferences</title>\n')
         fh.write('\t\t</title-group>\n')
@@ -436,7 +437,12 @@ class XmlWriter:
 
     def _write_pub_date(self, fh, date_str: str, indent: str = "\t\t"):
         day, month, year = date_str.split("-")
-        fh.write(f'{indent}<pub-date date-type="publication">\n')
+        fh.write('\t\t<pub-date date-type=\"pub\" publication-format=\"print\">\n')
+        fh.write(f'{indent}\t<day>{day.strip()}</day>\n')
+        fh.write(f'{indent}\t<month>{month.strip()}</month>\n')
+        fh.write(f'{indent}\t<year>{year.strip()}</year>\n')
+        fh.write(f'{indent}</pub-date>\n')
+        fh.write('\t\t<pub-date date-type=\"pub\" publication-format=\"electronic\">\n')
         fh.write(f'{indent}\t<day>{day.strip()}</day>\n')
         fh.write(f'{indent}\t<month>{month.strip()}</month>\n')
         fh.write(f'{indent}\t<year>{year.strip()}</year>\n')
@@ -464,7 +470,7 @@ class XmlWriter:
             self._write_collection_meta(fh)
 
             fh.write('\t<book-meta>\n')
-            fh.write(f'\t\t<book-id book-id-type="acm-id">{p["object_ID"]}</book-id>\n')
+#            fh.write(f'\t\t<book-id book-id-type="acm-id">{p["object_ID"]}</book-id>\n')
             fh.write(f'\t\t<book-id book-id-type="doi">10.5753/{p["proc_path"]}.{p["proc_year"]}</book-id>\n')
             fh.write('\t\t<book-title-group>\n')
             fh.write(f'\t\t\t<book-title>{p["issue_title"]}</book-title>\n')
@@ -474,7 +480,7 @@ class XmlWriter:
 
             fh.write('\t<book-part book-part-type="chapter" xml:lang="en">\n')
             fh.write('\t\t<book-part-meta>\n')
-            fh.write(f'\t\t\t<book-part-id book-part-id-type="acm-id">{p["object_ID"]}</book-part-id>\n')
+#            fh.write(f'\t\t\t<book-part-id book-part-id-type="acm-id">{p["object_ID"]}</book-part-id>\n')
             fh.write(f'\t\t\t<book-part-id book-part-id-type="doi">10.5753/{doi_suffix}</book-part-id>\n')
             fh.write('\t\t\t<title-group>\n')
             fh.write(f'\t\t\t\t<title>{paper["title"]}</title>\n')
@@ -492,14 +498,18 @@ class XmlWriter:
             fh.write(f'\t\t\t<fpage>{paper["first_page"]}</fpage>\n')
             fh.write(f'\t\t\t<lpage>{paper["last_page"]}</lpage>\n')
 
+            # Permissions
             fh.write('\t\t\t<permissions>\n')
             fh.write(f'\t\t\t\t<copyright-year>{date_parts[0]}</copyright-year>\n')
             fh.write('\t\t\t\t<copyright-holder>Copyright held by the owner/author(s).</copyright-holder>\n')
-            fh.write('\t\t\t\t<license license-type="open-access" xlink:href="https://creativecommons.org/licenses/by/4.0/">\n')
+            fh.write('\t\t\t\t<license license-type="open-access">\n')
             fh.write('\t\t\t\t\t<license-p>This work is licensed under <ext-link ext-link-type="uri" xlink:href="https://creativecommons.org/licenses/by/4.0/">Creative Commons Attribution International 4.0</ext-link>.</license-p>\n')
-            fh.write('\t\t\t\t\t<ali:license_ref xmlns:ali="http://www.niso.org/schemas/ali/1.0/">https://creativecommons.org/licenses/by/4.0/legalcode</ali:license_ref>\n')
+            fh.write('\t\t\t\t\t<ali:license_ref specific-use=\"version-of-record\" xmlns:ali="http://www.niso.org/schemas/ali/1.0/">https://creativecommons.org/licenses/by/4.0/legalcode</ali:license_ref>\n')
             fh.write('\t\t\t\t</license>\n')
             fh.write('\t\t\t</permissions>\n')
+            
+            fh.write(f'\t\t\t<self-uri content-type="pdf" xlink:href="{doi_suffix}.pdf"/>\n')
+
 
             fh.write('\t\t\t<abstract>\n')
             fh.write(f'\t\t\t\t<p>{paper["abstract"]}</p>\n')
@@ -545,7 +555,7 @@ class XmlWriter:
             parts = contributor.split(",")
             role, given_name, surname, affil, email = parts
             contrib_id = str(seq).zfill(5)
-            fh.write(f'\t\t\t<contrib contrib-type="other" id="bkseq-{contrib_id}">\n')
+            fh.write(f'\t\t\t<contrib contrib-type="chair" id="bkseq-{contrib_id}">\n')
             fh.write('\t\t\t\t<name>\n')
             fh.write(f'\t\t\t\t\t<surname>{surname}</surname>\n')
             fh.write(f'\t\t\t\t\t<given-names>{given_name}</given-names>\n')
@@ -574,7 +584,7 @@ class XmlWriter:
             self._write_collection_meta(fh)
 
             fh.write('\t<book-meta>\n')
-            fh.write(f'\t\t<book-id book-id-type="acm-id">{p["object_ID"]}</book-id>\n')
+#            fh.write(f'\t\t<book-id book-id-type="acm-id">{p["object_ID"]}</book-id>\n')
             fh.write(f'\t\t<book-id book-id-type="doi">10.5753/{p["proc_path"]}.{p["proc_year"]}</book-id>\n')
 
             # Conference collections
@@ -582,6 +592,14 @@ class XmlWriter:
             fh.write('\t\t\t<compound-subject>\n')
             fh.write(f'\t\t\t\t<compound-subject-part content-type="code">{p["proc_path"]}-mtg</compound-subject-part>\n')
             fh.write(f'\t\t\t\t<compound-subject-part content-type="text">{p["proc_acron"]}: {p["proc_title"]}</compound-subject-part>\n')
+            fh.write('\t\t\t</compound-subject>\n')
+            fh.write('\t\t</subj-group>\n')
+
+            # Conference societies
+            fh.write('\t\t<subj-group subj-group-type="computer-societies">\n')
+            fh.write('\t\t\t<compound-subject>\n')
+            fh.write('\t\t\t\t<compound-subject-part content-type="code">sbc</compound-subject-part>\n')
+            fh.write('\t\t\t\t<compound-subject-part content-type="text">Brazilian Computer Society</compound-subject-part>\n')
             fh.write('\t\t\t</compound-subject>\n')
             fh.write('\t\t</subj-group>\n')
 
@@ -604,7 +622,12 @@ class XmlWriter:
 
             # Publication date (format from params: DD/MM/YYYY)
             day, month, year = date_pub.split("/")
-            fh.write('\t\t<pub-date date-type="publication">\n')
+            fh.write('\t\t<pub-date date-type=\"pub\" publication-format=\"print\">\n')
+            fh.write(f'\t\t\t<day>{day.strip()}</day>\n')
+            fh.write(f'\t\t\t<month>{month.strip()}</month>\n')
+            fh.write(f'\t\t\t<year>{year.strip()}</year>\n')
+            fh.write('\t\t</pub-date>\n')
+            fh.write('\t\t<pub-date date-type=\"pub\" publication-format=\"electronic\">\n')
             fh.write(f'\t\t\t<day>{day.strip()}</day>\n')
             fh.write(f'\t\t\t<month>{month.strip()}</month>\n')
             fh.write(f'\t\t\t<year>{year.strip()}</year>\n')
@@ -618,10 +641,13 @@ class XmlWriter:
 
             fh.write('\t\t<permissions>\n')
             fh.write(f'\t\t\t<copyright-year>{p["proc_year"]}</copyright-year>\n')
+            fh.write('\t\t\t<license license-type=\"free\">\n')
+            fh.write('\t\t\t\t<license-p/>\n')
+            fh.write('\t\t\t</license>\n')
             fh.write('\t\t</permissions>\n')
 
             if p.get("has_FM") == "yes":
-                fh.write(f'\t\t<self-uri content-type="fm-pdf" xlink:href="{p["object_ID"]}.fm.pdf">Front matter (Title page, Contents, Welcome, Author index)</self-uri>\n')
+                fh.write(f'\t\t<self-uri content-type="fm-pdf" xlink:href="{p["object_ID"]}.fm.pdf">Front matter</self-uri>\n')
             if p.get("has_Full") == "yes":
                 fh.write(f'\t\t<self-uri content-type="pdf" xlink:href="{p["object_ID"]}.pdf">{p["proc_acron"]} {p["proc_year"]}</self-uri>\n')
 
@@ -683,6 +709,7 @@ def main():
     for submission_id, pages in zip(paper_ids, page_ranges):
         paper = scrape_article(params["proc_path"], submission_id, pages)
         papers.append(paper)
+        time.sleep(2.5)
 
     print(f"\n->{len(papers)} article(s) collected.")
 
